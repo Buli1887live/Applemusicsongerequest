@@ -1,0 +1,211 @@
+<!--
+Dateiname: index.html
+Beschreibung: Frontend mit Autocomplete (iTunes Search API). Filtert "E"-Tracks und sendet die trackViewUrl an wish.php
+--> 
+
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Song-Wunsch</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; max-width:800px; margin:40px auto; padding:0 16px; color:#111; }
+    h1{font-size:1.4rem;margin-bottom:0.2rem}
+    p{color:#444;margin-top:0}
+    #searchBox{display:flex;gap:8px;margin-top:16px}
+    input[type=text]{flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:1rem}
+    ul#results{list-style:none;padding:0;margin:12px 0;border-radius:8px}
+    ul#results li{padding:10px;border:1px solid #eee;margin-bottom:6px;border-radius:8px;cursor:pointer;display:flex;gap:12px;align-items:center}
+    ul#results li img{width:48px;height:48px;object-fit:cover;border-radius:6px}
+    .meta{font-size:0.95rem}
+    .artist{color:#666;font-size:0.85rem}
+    .note{font-size:0.9rem;color:#666;margin-top:8px}
+    button{padding:10px 14px;border-radius:8px;border:0;background:#0070c9;color:white;cursor:pointer}
+    .small{font-size:0.85rem;color:#666}
+  </style>
+</head>
+<body>
+  <h1>Song-Wunsch</h1>
+  <p>Tippe einen Song oder Künstler. Es werden nur nicht-explicite Titel angezeigt. Klick auf einen Eintrag, um den Wunsch zu speichern.</p>
+
+  <div id="searchBox">
+    <input id="songInput" type="text" placeholder="Songtitel oder Künstler (mind. 3 Zeichen)" autocomplete="off">
+    <button id="clearBtn" title="Eingabe löschen">✕</button>
+  </div>
+  <div class="note">Hinweis: Songs werden als Apple Music Web-Links gespeichert. Ein lokales Skript (optional) kann die Links automatisch im Webplayer öffnen.</div>
+
+  <ul id="results" aria-live="polite"></ul>
+
+  <script>
+    const input = document.getElementById('songInput');
+    const resultsList = document.getElementById('results');
+    const clearBtn = document.getElementById('clearBtn');
+
+    clearBtn.addEventListener('click', () => { input.value=''; resultsList.innerHTML=''; input.focus(); });
+
+    let controller = null; // abort previous requests
+    let debounceTimer = null;
+
+    input.addEventListener('input', () => {
+      const term = input.value.trim();
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (term.length < 3) { resultsList.innerHTML = ''; return; }
+      debounceTimer = setTimeout(() => { searchTerm(term); }, 250);
+    });
+
+    async function searchTerm(term) {
+      if (controller) controller.abort();
+      controller = new AbortController();
+      const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=10`;
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        const data = await res.json();
+        renderResults(data.results || []);
+      } catch (err) {
+        if (err.name !== 'AbortError') console.error('Suchfehler', err);
+      }
+    }
+
+    function renderResults(items) {
+      resultsList.innerHTML = '';
+      if (!items.length) {
+        resultsList.innerHTML = '<li class="small">Keine Treffer</li>';
+        return;
+      }
+
+      items.forEach(track => {
+        if (track.trackExplicitness !== 'notExplicit') return; // Filter explicit
+
+        const li = document.createElement('li');
+
+        const img = document.createElement('img');
+        img.src = track.artworkUrl60 || '';
+        img.alt = '';
+
+        const meta = document.createElement('div');
+        meta.innerHTML = `<div class="meta">${escapeHtml(track.trackName)}</div><div class="artist">${escapeHtml(track.artistName)} — ${escapeHtml(track.collectionName || '')}</div>`;
+
+        li.appendChild(img);
+        li.appendChild(meta);
+        li.addEventListener('click', () => chooseTrack(track));
+        resultsList.appendChild(li);
+      });
+
+      if (!resultsList.children.length) resultsList.innerHTML = '<li class="small">Nur explicit-Titel gefunden – keine erlaubten Treffer.</li>';
+    }
+
+    function escapeHtml(s){ return s ? s.replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]) : ''; }
+
+    async function chooseTrack(track) {
+      // send trackViewUrl to backend
+      const body = new URLSearchParams();
+      body.append('url', track.trackViewUrl);
+      body.append('title', `${track.trackName} – ${track.artistName}`);
+
+      try {
+        const resp = await fetch('wish.php', { method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
+        if (resp.ok) {
+          alert('Songwunsch gespeichert: ' + track.trackName + ' – ' + track.artistName);
+          input.value = '';
+          resultsList.innerHTML = '';
+        } else {
+          alert('Fehler beim Speichern');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Netzwerkfehler beim Speichern');
+      }
+    }
+  </script>
+
+  <!--
+    ------------------------------------------------------------------
+    Backend-Datei: wish.php
+    Leg diese Datei in denselben Ordner wie index.html auf deinem Webserver (PHP benötigt).
+    Der PHP-Code schreibt die Apple Music Web-Link-URL plus Titel zeitgestempelt in wish_queue.txt
+  -->
+
+  <!--
+  ----- FILE: wish.php -----
+  <?php
+  // Einfaches, sicheres appending der Wunsch-URL in eine Textdatei
+  if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $url = $_POST['url'] ?? '';
+    $title = $_POST['title'] ?? '';
+    $url = trim($url);
+    $title = trim($title);
+    if ($url && filter_var($url, FILTER_VALIDATE_URL)) {
+      $line = date('Y-m-d H:i:s') . "\t" . $title . "\t" . $url . PHP_EOL;
+      file_put_contents('wish_queue.txt', $line, FILE_APPEND | LOCK_EX);
+      http_response_code(200);
+      echo 'OK';
+      exit;
+    }
+  }
+  http_response_code(400);
+  echo 'Bad Request';
+  ?>
+  ----- END wish.php -----
+  -->
+
+  <!--
+    ------------------------------------------------------------------
+    Optional: lokales Script zum automatischen Öffnen der Links im Webplayer
+    (music_autoqueue.py). Leg es lokal auf dem Gerät, das die Links öffnen soll.
+
+    ----- FILE: music_autoqueue.py -----
+    #!/usr/bin/env python3
+    import time
+    import webbrowser
+    import os
+
+    WISH_FILE = '/path/to/your/site/wish_queue.txt'  # Pfad auf dem Server oder lokal synchronisiert
+    PROCESSED_FILE = 'processed_queue.txt'
+
+    def already_done(url):
+        if not os.path.exists(PROCESSED_FILE):
+            return False
+        with open(PROCESSED_FILE,'r') as f:
+            return url.strip() in [x.strip() for x in f.readlines()]
+
+    def mark_done(url):
+        with open(PROCESSED_FILE,'a') as f:
+            f.write(url.strip()+"\n")
+
+    while True:
+        try:
+            if os.path.exists(WISH_FILE):
+                with open(WISH_FILE,'r') as f:
+                    lines = [l.strip() for l in f.readlines() if l.strip()]
+                for line in lines:
+                    parts = line.split('\t')
+                    # format: timestamp \t title \t url
+                    if len(parts) >= 3:
+                        url = parts[2].strip()
+                        if url and not already_done(url):
+                            print('Opening', url)
+                            webbrowser.open(url)
+                            mark_done(url)
+            time.sleep(6)
+        except Exception as e:
+            print('Error', e)
+            time.sleep(10)
+    ----- END music_autoqueue.py -----
+  -->
+
+  <!--
+    Kurzanleitung (kurz und pragmatisch):
+    1) index.html und wish.php in denselben Ordner auf Webserver hochladen. PHP aktiv.
+    2) Dateirechte prüfen: webserver muss write-Rechte in diesem Ordner haben (für wish_queue.txt).
+    3) Test: öffne index.html, suche "Coldplay" etc. Wähle Track -> wish_queue.txt füllt sich.
+    4) Optional: music_autoqueue.py lokal ausführen (oder per cron), damit die Webplayer-Links automatisch geöffnet werden.
+    5) QR-Code: erzeugen mit der URL zur index.html.
+
+    Sicherheit & Hinweise:
+    - Diese Lösung ist minimal und pragmatisch. Kein Auth, keine Nutzer-Trennung.
+    - Für Produktion: Input-Rate-Limits, CSRF-Token, Basic-Auth oder Passwortschutz ergänzen.
+    - Wenn du automatische Queue-Clicks willst, musst du Selenium nutzen (Browser-Automation). Kann ich bauen.
+  -->
+</body>
+</html>
